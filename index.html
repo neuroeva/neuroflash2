@@ -737,59 +737,123 @@ select option{background:var(--s2)}
   </main>
 </div>
 
-<!-- FIREBASE SDK -->
+<script src="https://apis.google.com/js/api.js"></script>
+<script src="https://accounts.google.com/gsi/client"></script>
+
+<!-- GOOGLE DRIVE SYNC -->
 <script type="module">
-import{initializeApp}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import{getFirestore,doc,collection,setDoc,deleteDoc,onSnapshot}from'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+const CLIENT_ID='COLOQUE_SEU_CLIENT_ID_GOOGLE_AQUI';
+const API_KEY='COLOQUE_SUA_API_KEY_AQUI';
+const DISCOVERY_DOC='https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
+const SCOPES='https://www.googleapis.com/auth/drive.appdata';
 
-const app=initializeApp({
-  apiKey:"AIzaSyAnWQhulXz8QyUOAfJmyQlfpAj1W1B0ojE",
-  authDomain:"neuroflash-b17e3.firebaseapp.com",
-  projectId:"neuroflash-b17e3",
-  storageBucket:"neuroflash-b17e3.firebasestorage.app",
-  messagingSenderId:"278934526914",
-  appId:"1:278934526914:web:8dffb72a56f1f96e62d45b"
-});
-const db=getFirestore(app);
+let tokenClient;
+let driveFileId=null;
 
-// Use a fixed user ID stored in localStorage
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  onAuthStateChanged
-} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+window._store={cards:{},folders:{},history:{},shared_codes:{}};
+window._listeners={cards:null,folders:null,history:null};
 
-const auth = getAuth(app);
-const provider = new GoogleAuthProvider();
+async function initGoogle(){
+  await new Promise(r=>gapi.load('client',r));
+  await gapi.client.init({apiKey:API_KEY,discoveryDocs:[DISCOVERY_DOC]});
+  tokenClient=google.accounts.oauth2.initTokenClient({
+    client_id:CLIENT_ID,
+    scope:SCOPES,
+    callback: async (resp)=>{
+      if(resp.access_token){
+        await loadFromDrive();
+        window._uid='google-user';
+        document.dispatchEvent(new Event('fb-ready'));
+      }
+    }
+  });
+}
 
-window.loginGoogle = async function(){
-  await signInWithPopup(auth, provider);
+window.loginGoogle=async function(){
+  if(!tokenClient) await initGoogle();
+  tokenClient.requestAccessToken();
 };
 
-onAuthStateChanged(auth,(user)=>{
-  if(user){
-    window._uid = user.uid;
-    document.dispatchEvent(new Event('fb-ready'));
+async function findFile(){
+  const res=await gapi.client.drive.files.list({
+    spaces:'appDataFolder',
+    fields:'files(id,name)'
+  });
+  const file=res.result.files?.find(f=>f.name==='neuroflash-data.json');
+  if(file) driveFileId=file.id;
+}
+
+async function loadFromDrive(){
+  await findFile();
+  if(!driveFileId){ emitAll(); return; }
+
+  const file=await gapi.client.drive.files.get({
+    fileId:driveFileId,
+    alt:'media'
+  });
+
+  window._store=file.result || window._store;
+  emitAll();
+}
+
+async function saveToDrive(){
+  const metadata={name:'neuroflash-data.json',parents:['appDataFolder']};
+  const boundary='neuroflash';
+  const body =
+    '--'+boundary+'
+Content-Type: application/json; charset=UTF-8
+
+'+
+    JSON.stringify(metadata)+'
+'+
+    '--'+boundary+'
+Content-Type: application/json
+
+'+
+    JSON.stringify(window._store)+'
+--'+boundary+'--';
+
+  if(driveFileId){
+    await gapi.client.request({
+      path:'/upload/drive/v3/files/'+driveFileId,
+      method:'PATCH',
+      params:{uploadType:'multipart'},
+      headers:{'Content-Type':'multipart/related; boundary='+boundary},
+      body
+    });
+  } else {
+    const res=await gapi.client.request({
+      path:'/upload/drive/v3/files',
+      method:'POST',
+      params:{uploadType:'multipart'},
+      headers:{'Content-Type':'multipart/related; boundary='+boundary},
+      body
+    });
+    driveFileId=res.result.id;
   }
-});
-  
-window._saveCard=async(id,card)=>setDoc(doc(db,'users',id,'cards',card.id),card);
-window._delCard=async(id,cardId)=>deleteDoc(doc(db,'users',id,'cards',cardId));
-window._saveFolder=async(id,f)=>setDoc(doc(db,'users',id,'folders',f.id),f);
-window._delFolder=async(id,fid)=>deleteDoc(doc(db,'users',id,'folders',fid));
-window._saveHist=async(id,e)=>setDoc(doc(db,'users',id,'history',e.id),e);
-window._saveCode=async(code,data)=>setDoc(doc(db,'shared_codes',code),data);
+  emitAll();
+}
 
-// Start listening
+function emitAll(){
+  if(window._listeners.cards) window._listeners.cards(Object.values(window._store.cards||{}));
+  if(window._listeners.folders) window._listeners.folders(Object.values(window._store.folders||{}));
+  if(window._listeners.history) window._listeners.history(Object.values(window._store.history||{}));
+}
+
+window._saveCard=async(id,card)=>{window._store.cards[card.id]=card; await saveToDrive();};
+window._delCard=async(id,cardId)=>{delete window._store.cards[cardId]; await saveToDrive();};
+window._saveFolder=async(id,f)=>{window._store.folders[f.id]=f; await saveToDrive();};
+window._delFolder=async(id,fid)=>{delete window._store.folders[fid]; await saveToDrive();};
+window._saveHist=async(id,e)=>{window._store.history[e.id]=e; await saveToDrive();};
+window._saveCode=async(code,data)=>{window._store.shared_codes[code]=data; await saveToDrive();};
+
 window._startListeners=function(onCards,onFolders,onHist){
-  const u1=onSnapshot(collection(db,'users',uid,'cards'),s=>{const d=[];s.forEach(x=>d.push(x.data()));onCards(d);});
-  const u2=onSnapshot(collection(db,'users',uid,'folders'),s=>{const d=[];s.forEach(x=>d.push(x.data()));onFolders(d);});
-  const u3=onSnapshot(collection(db,'users',uid,'history'),s=>{const d=[];s.forEach(x=>d.push(x.data()));onHist(d.sort((a,b)=>b.date-a.date));});
-  return[u1,u2,u3];
+  window._listeners.cards=onCards;
+  window._listeners.folders=onFolders;
+  window._listeners.history=onHist;
+  emitAll();
+  return [()=>{},()=>{},()=>{}];
 };
-
-document.dispatchEvent(new Event('fb-ready'));
 </script>
 
 
